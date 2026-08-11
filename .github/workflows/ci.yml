@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: kube-secret-rotate
+    env:
+      GO_VERSION: "1.22.5"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Go
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends curl ca-certificates git
+          arch="$(uname -m)"; case "$arch" in x86_64) arch=amd64;; aarch64|arm64) arch=arm64;; esac
+          # Official tarball is .tar.gz (the minimal runner has no xz).
+          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz" | sudo tar -xz -C /usr/local
+          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+
+      - name: Go version
+        run: go version
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race)
+        run: go test -race ./...
+
+      - name: Build
+        run: |
+          go build -o kube-secret-rotate ./cmd/kube-secret-rotate
+          ./kube-secret-rotate --secret x 2>&1 | grep -q "nothing to rotate" || true
+          ./kube-secret-rotate 2>&1 | grep -q "secret is required"
+
+      - name: Check formatting
+        run: |
+          fmt="$(gofmt -l .)"
+          if [ -n "$fmt" ]; then echo "gofmt needed on:"; echo "$fmt"; exit 1; fi

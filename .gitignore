@@ -1,0 +1,15 @@
+# Built binary — anchored to repo root so it never matches cmd/kube-secret-rotate/
+/kube-secret-rotate
+/dist/
+
+# Test / coverage output
+/coverage.out
+*.test
+
+# Keep test fixtures tracked regardless of the globs above
+!testdata/**
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
