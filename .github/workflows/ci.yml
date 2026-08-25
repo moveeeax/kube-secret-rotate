@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: kube-secret-rotate
+    runs-on: ubuntu-latest
     env:
       GO_VERSION: "1.22.5"
     steps:
