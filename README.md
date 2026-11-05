@@ -1,7 +1,7 @@
 # kube-secret-rotate
 
 [![ci](https://github.com/moveeeax/kube-secret-rotate/actions/workflows/ci.yml/badge.svg)](https://github.com/moveeeax/kube-secret-rotate/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/badge/go-1.22-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/go-1.26%20%7C%201.27-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 One command to rotate a Kubernetes `Secret` **and** roll the workloads that
