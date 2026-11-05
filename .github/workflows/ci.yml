@@ -14,20 +14,16 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      GO_VERSION: "1.22.5"
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.26", "1.27"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
-      - name: Install Go
-        run: |
-          set -euxo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends curl ca-certificates git gcc libc6-dev
-          arch="$(uname -m)"; case "$arch" in x86_64) arch=amd64;; aarch64|arm64) arch=arm64;; esac
-          # Official tarball is .tar.gz (the minimal runner has no xz).
-          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz" | sudo tar -xz -C /usr/local
-          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
 
       - name: Go version
         run: go version
