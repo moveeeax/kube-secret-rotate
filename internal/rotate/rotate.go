@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"sort"
 
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,8 +21,9 @@ import (
 )
 
 // AnnotationKey is stamped onto a workload's pod template. Changing its value
-// changes the pod template hash, which is what makes the Deployment or
-// StatefulSet controller roll its pods.
+// changes the pod template hash, which is what makes the Deployment,
+// StatefulSet or DaemonSet controller roll its pods. On a CronJob it lands on
+// the Job template, so the next scheduled Job is created with it.
 const AnnotationKey = "kube-secret-rotate/checksum"
 
 // Options configures a rotation.
@@ -37,11 +40,31 @@ type Options struct {
 	KeepPrevious bool
 }
 
+// Action says what a rotation does to an impacted workload.
+type Action string
+
+const (
+	// ActionRoll: the pod template is stamped and the controller performs a
+	// rolling restart.
+	ActionRoll Action = "roll"
+	// ActionOnDelete: the pod template is stamped, but the StatefulSet or
+	// DaemonSet uses the OnDelete update strategy, so running pods keep the
+	// old value until someone deletes them.
+	ActionOnDelete Action = "on-delete"
+	// ActionNextRun: the CronJob's Job template is stamped; nothing restarts,
+	// the next scheduled Job picks up the new value.
+	ActionNextRun Action = "next-run"
+	// ActionManual: a running Job or a bare Pod. There is no template to
+	// stamp, so it is reported and left for the operator to restart by hand.
+	ActionManual Action = "manual"
+)
+
 // Impact is a single workload affected by a rotation.
 type Impact struct {
-	Kind    string // "Deployment" or "StatefulSet"
+	Kind    string // "CronJob", "DaemonSet", "Deployment", "Job", "Pod" or "StatefulSet"
 	Name    string
 	Reasons []string
+	Action  Action
 }
 
 // Result summarizes a rotation.
@@ -156,6 +179,11 @@ type secretWriter interface {
 
 func discoverImpacts(ctx context.Context, client kubernetes.Interface, ns, secret string) ([]Impact, error) {
 	var impacts []Impact
+	add := func(kind, name string, spec *corev1.PodSpec, action Action) {
+		if refs := discover.PodSpecRefs(spec, secret); refs.Any() {
+			impacts = append(impacts, Impact{Kind: kind, Name: name, Reasons: refs.Reasons(), Action: action})
+		}
+	}
 
 	deploys, err := client.AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -163,9 +191,7 @@ func discoverImpacts(ctx context.Context, client kubernetes.Interface, ns, secre
 	}
 	for i := range deploys.Items {
 		d := &deploys.Items[i]
-		if refs := discover.PodSpecRefs(&d.Spec.Template.Spec, secret); refs.Any() {
-			impacts = append(impacts, Impact{Kind: "Deployment", Name: d.Name, Reasons: refs.Reasons()})
-		}
+		add("Deployment", d.Name, &d.Spec.Template.Spec, ActionRoll)
 	}
 
 	sets, err := client.AppsV1().StatefulSets(ns).List(ctx, metav1.ListOptions{})
@@ -174,9 +200,62 @@ func discoverImpacts(ctx context.Context, client kubernetes.Interface, ns, secre
 	}
 	for i := range sets.Items {
 		s := &sets.Items[i]
-		if refs := discover.PodSpecRefs(&s.Spec.Template.Spec, secret); refs.Any() {
-			impacts = append(impacts, Impact{Kind: "StatefulSet", Name: s.Name, Reasons: refs.Reasons()})
+		action := ActionRoll
+		if s.Spec.UpdateStrategy.Type == appsv1.OnDeleteStatefulSetStrategyType {
+			action = ActionOnDelete
 		}
+		add("StatefulSet", s.Name, &s.Spec.Template.Spec, action)
+	}
+
+	daemons, err := client.AppsV1().DaemonSets(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list daemonsets: %w", err)
+	}
+	for i := range daemons.Items {
+		d := &daemons.Items[i]
+		action := ActionRoll
+		if d.Spec.UpdateStrategy.Type == appsv1.OnDeleteDaemonSetStrategyType {
+			action = ActionOnDelete
+		}
+		add("DaemonSet", d.Name, &d.Spec.Template.Spec, action)
+	}
+
+	crons, err := client.BatchV1().CronJobs(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list cronjobs: %w", err)
+	}
+	for i := range crons.Items {
+		c := &crons.Items[i]
+		add("CronJob", c.Name, &c.Spec.JobTemplate.Spec.Template.Spec, ActionNextRun)
+	}
+
+	// A Job's pod template is immutable, so a running Job cannot be rolled.
+	// Report it so the stale pods are not missed; finished Jobs are skipped.
+	jobs, err := client.BatchV1().Jobs(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list jobs: %w", err)
+	}
+	for i := range jobs.Items {
+		j := &jobs.Items[i]
+		if jobFinished(j) {
+			continue
+		}
+		add("Job", j.Name, &j.Spec.Template.Spec, ActionManual)
+	}
+
+	// Pods with a controller are covered by the owner above (or by an owner
+	// this tool does not manage). Only bare, live pods are reported here.
+	pods, err := client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if metav1.GetControllerOfNoCopy(p) != nil ||
+			p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		add("Pod", p.Name, &p.Spec, ActionManual)
 	}
 
 	sort.Slice(impacts, func(i, j int) bool {
@@ -188,6 +267,18 @@ func discoverImpacts(ctx context.Context, client kubernetes.Interface, ns, secre
 	return impacts, nil
 }
 
+// jobFinished reports whether a Job has a true Complete or Failed condition.
+func jobFinished(j *batchv1.Job) bool {
+	for _, c := range j.Status.Conditions {
+		if (c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed) && c.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+// roll stamps the pod template of every impacted controller. Jobs and bare
+// Pods (ActionManual) have no template to stamp and are skipped.
 func roll(ctx context.Context, client kubernetes.Interface, ns string, impacts []Impact, checksum string) error {
 	for _, im := range impacts {
 		switch im.Kind {
@@ -208,6 +299,24 @@ func roll(ctx context.Context, client kubernetes.Interface, ns string, impacts [
 			stamp(&s.Spec.Template, checksum)
 			if _, err := client.AppsV1().StatefulSets(ns).Update(ctx, s, metav1.UpdateOptions{}); err != nil {
 				return fmt.Errorf("roll statefulset %s: %w", im.Name, err)
+			}
+		case "DaemonSet":
+			d, err := client.AppsV1().DaemonSets(ns).Get(ctx, im.Name, metav1.GetOptions{})
+			if err != nil {
+				return fmt.Errorf("get daemonset %s: %w", im.Name, err)
+			}
+			stamp(&d.Spec.Template, checksum)
+			if _, err := client.AppsV1().DaemonSets(ns).Update(ctx, d, metav1.UpdateOptions{}); err != nil {
+				return fmt.Errorf("roll daemonset %s: %w", im.Name, err)
+			}
+		case "CronJob":
+			c, err := client.BatchV1().CronJobs(ns).Get(ctx, im.Name, metav1.GetOptions{})
+			if err != nil {
+				return fmt.Errorf("get cronjob %s: %w", im.Name, err)
+			}
+			stamp(&c.Spec.JobTemplate.Spec.Template, checksum)
+			if _, err := client.BatchV1().CronJobs(ns).Update(ctx, c, metav1.UpdateOptions{}); err != nil {
+				return fmt.Errorf("stamp cronjob %s: %w", im.Name, err)
 			}
 		}
 	}
