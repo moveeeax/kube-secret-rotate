@@ -1,11 +1,14 @@
 // Command kube-secret-rotate updates a Kubernetes Secret and rolls the
-// Deployments and StatefulSets that consume it.
+// Deployments, StatefulSets and DaemonSets that consume it. CronJobs get the
+// new value on their next run; running Jobs and bare Pods are reported for a
+// manual restart.
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,7 +106,7 @@ func collectData(files, literals []string) (map[string][]byte, error) {
 	return data, nil
 }
 
-func report(w *os.File, secret, ns string, dryRun bool, res *rotate.Result) {
+func report(w io.Writer, secret, ns string, dryRun bool, res *rotate.Result) {
 	verb := "Rotated"
 	if dryRun {
 		verb = "Would rotate"
@@ -116,13 +119,42 @@ func report(w *os.File, secret, ns string, dryRun bool, res *rotate.Result) {
 		fmt.Fprintln(w, "  no workloads reference this secret")
 		return
 	}
-	rollVerb := "rolling"
-	if dryRun {
-		rollVerb = "would roll"
-	}
-	fmt.Fprintf(w, "  %s %d workload(s):\n", rollVerb, len(res.Impacts))
+
+	byAction := map[rotate.Action][]rotate.Impact{}
 	for _, im := range res.Impacts {
-		fmt.Fprintf(w, "    - %s/%s (%s)\n", im.Kind, im.Name, strings.Join(im.Reasons, ","))
+		byAction[im.Action] = append(byAction[im.Action], im)
+	}
+	// Each group's header is a format string taking the workload count.
+	groups := []struct {
+		action    rotate.Action
+		live, dry string
+	}{
+		{rotate.ActionRoll,
+			"rolling %d workload(s):",
+			"would roll %d workload(s):"},
+		{rotate.ActionOnDelete,
+			"stamped %d workload(s) with OnDelete strategy, delete their pods to restart:",
+			"would stamp %d workload(s) with OnDelete strategy, delete their pods to restart:"},
+		{rotate.ActionNextRun,
+			"stamped %d CronJob(s), next run picks it up, no restart:",
+			"would stamp %d CronJob(s), next run picks it up, no restart:"},
+		{rotate.ActionManual,
+			"%d unmanaged workload(s), restart by hand:",
+			"%d unmanaged workload(s), restart by hand:"},
+	}
+	for _, g := range groups {
+		list := byAction[g.action]
+		if len(list) == 0 {
+			continue
+		}
+		format := g.live
+		if dryRun {
+			format = g.dry
+		}
+		fmt.Fprintf(w, "  "+format+"\n", len(list))
+		for _, im := range list {
+			fmt.Fprintf(w, "    - %s/%s (%s)\n", im.Kind, im.Name, strings.Join(im.Reasons, ","))
+		}
 	}
 }
 

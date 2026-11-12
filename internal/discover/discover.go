@@ -11,13 +11,14 @@ import (
 
 // Refs records the ways a pod template references a secret.
 type Refs struct {
-	Env     bool // container env[].valueFrom.secretKeyRef
-	EnvFrom bool // container envFrom[].secretRef
-	Volume  bool // pod volumes[].secret.secretName
+	Env       bool // container env[].valueFrom.secretKeyRef
+	EnvFrom   bool // container envFrom[].secretRef
+	Volume    bool // pod volumes[].secret.secretName
+	Projected bool // pod volumes[].projected.sources[].secret.name
 }
 
 // Any reports whether the pod references the secret at all.
-func (r Refs) Any() bool { return r.Env || r.EnvFrom || r.Volume }
+func (r Refs) Any() bool { return r.Env || r.EnvFrom || r.Volume || r.Projected }
 
 // Reasons returns a stable, human-readable list of reference kinds.
 func (r Refs) Reasons() []string {
@@ -30,6 +31,9 @@ func (r Refs) Reasons() []string {
 	}
 	if r.Volume {
 		out = append(out, "volume")
+	}
+	if r.Projected {
+		out = append(out, "projected")
 	}
 	sort.Strings(out)
 	return out
@@ -63,6 +67,13 @@ func PodSpecRefs(spec *corev1.PodSpec, secret string) Refs {
 	for _, v := range spec.Volumes {
 		if v.Secret != nil && v.Secret.SecretName == secret {
 			r.Volume = true
+		}
+		if v.Projected != nil {
+			for _, src := range v.Projected.Sources {
+				if src.Secret != nil && src.Secret.Name == secret {
+					r.Projected = true
+				}
+			}
 		}
 	}
 	return r

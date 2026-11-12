@@ -71,6 +71,38 @@ func TestPodSpecRefs(t *testing.T) {
 			want:   Refs{Volume: true},
 		},
 		{
+			name: "projected volume secret source match",
+			spec: corev1.PodSpec{
+				Volumes: []corev1.Volume{{
+					Name: "bundle",
+					VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+						Sources: []corev1.VolumeProjection{
+							{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "db-creds"}}},
+							{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "db-creds"}}},
+						},
+					}},
+				}},
+			},
+			secret: "db-creds",
+			want:   Refs{Projected: true},
+		},
+		{
+			name: "projected volume with only other sources is ignored",
+			spec: corev1.PodSpec{
+				Volumes: []corev1.Volume{{
+					Name: "bundle",
+					VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+						Sources: []corev1.VolumeProjection{
+							{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "db-creds"}}},
+							{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "other"}}},
+						},
+					}},
+				}},
+			},
+			secret: "db-creds",
+			want:   Refs{},
+		},
+		{
 			name: "init container env counts",
 			spec: corev1.PodSpec{
 				InitContainers: []corev1.Container{{Name: "migrate", Env: []corev1.EnvVar{envRef("db-creds")}}},
@@ -113,8 +145,8 @@ func TestPodSpecRefsNilSpec(t *testing.T) {
 }
 
 func TestReasons(t *testing.T) {
-	got := Refs{Env: true, Volume: true}.Reasons()
-	want := []string{"env", "volume"}
+	got := Refs{Env: true, Volume: true, Projected: true}.Reasons()
+	want := []string{"env", "projected", "volume"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Reasons = %v, want %v", got, want)
 	}

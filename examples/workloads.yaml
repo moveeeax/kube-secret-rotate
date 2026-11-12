@@ -3,8 +3,10 @@
 #
 #   kube-secret-rotate --secret db-creds -n demo --from-file password=./examples/new.env --dry-run
 #
-# The `api` Deployment (env) and `postgres` StatefulSet (volume) are impacted;
-# `frontend` references a different Secret and is left alone.
+# The `api` Deployment (env), `postgres` StatefulSet (volume) and `node-agent`
+# DaemonSet (projected volume) are rolled; the `nightly-backup` CronJob (envFrom)
+# is stamped for its next run. `frontend` references a different Secret and is
+# left alone.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -66,6 +68,52 @@ spec:
         - name: creds
           secret:
             secretName: db-creds
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-agent
+  namespace: demo
+spec:
+  selector:
+    matchLabels: { app: node-agent }
+  template:
+    metadata:
+      labels: { app: node-agent }
+    spec:
+      containers:
+        - name: agent
+          image: busybox:1.37
+          command: ["sh", "-c", "sleep infinity"]
+          volumeMounts:
+            - name: bundle
+              mountPath: /etc/bundle
+      volumes:
+        - name: bundle
+          projected:
+            sources:
+              - secret:
+                  name: db-creds
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nightly-backup
+  namespace: demo
+spec:
+  schedule: "0 3 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: busybox:1.37
+              command: ["sh", "-c", "echo backup"]
+              envFrom:
+                - secretRef:
+                    name: db-creds
 ---
 apiVersion: apps/v1
 kind: Deployment
